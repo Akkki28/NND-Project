@@ -30,9 +30,9 @@ TRAFFIC_PROFILES = [
     {"name": "Video", "load_range": (0.8, 2.0), "preferred_slice": 1},  
     {"name": "Audio", "load_range": (0.2, 0.8), "preferred_slice": 4},  
     {"name": "IoT", "load_range": (0.1, 0.3), "preferred_slice": 0},    
-    {"name": "WebData", "load_range": (0.5, 1.5), "preferred_slice": 1}, 
+    {"name": "WebData", "load_range": (0.5, 1.5), "preferred_slice": 2}, 
     {"name": "ControlData", "load_range": (0.3, 0.7), "preferred_slice": 3}, 
-    {"name": "BestEffort", "load_range": (0.1, 1.0), "preferred_slice": 4}   
+    {"name": "BestEffort", "load_range": (0.1, 1.0), "preferred_slice": 2}  
 ]
 
 class NetworkSlicingEnv(gym.Env):
@@ -102,6 +102,13 @@ class NetworkSlicingEnv(gym.Env):
     
     def _process_arrivals(self):
         num_arrivals = np.random.poisson(self.arrival_rate)
+
+        if self.current_step % 10 == 0: 
+            for profile_idx in range(self.num_profiles):
+                profile = self.traffic_profiles[profile_idx]
+                min_load, max_load = profile["load_range"]
+                load = random.uniform(min_load, max_load)
+                self._add_specific_ue(profile_idx, load)
         
         for _ in range(num_arrivals):
             self._add_ue()
@@ -142,6 +149,62 @@ class NetworkSlicingEnv(gym.Env):
             self.ue_types_per_slice[allocated_slice, profile_idx] += 1
         else:
             self.rejected_ues += 1
+
+    
+    def _add_specific_ue(self, profile_idx, load):
+        profile = self.traffic_profiles[profile_idx]
+        preferred_slice = profile["preferred_slice"]
+        
+        ue = {
+            "profile": profile_idx,
+            "load": load,
+            "preferred_slice": preferred_slice,
+            "allocated_slice": None,
+            "time_in_network": 0,
+            "id": self.total_ues
+        }
+        
+        self.total_ues += 1
+        
+        slice_options = [(preferred_slice, 0)] 
+        
+        for slice_idx in range(self.num_slices):
+            if slice_idx != preferred_slice:
+                penalty = 0.1  
+                slice_options.append((slice_idx, penalty))
+        
+        slice_options.sort(key=lambda x: (self.slice_loads[x[0]] / self.slices[x[0]]["bandwidth"]) + x[1])
+        
+        for slice_idx, _ in slice_options:
+            if self.slice_loads[slice_idx] + load <= self.slices[slice_idx]["bandwidth"]:
+                ue["allocated_slice"] = slice_idx
+                self.ues.append(ue)
+                self.slice_loads[slice_idx] += load
+                self.ue_count_per_slice[slice_idx] += 1
+                self.ue_types_per_slice[slice_idx, profile_idx] += 1
+                return
+            
+        self.rejected_ues += 1
+
+        slice_options = [(preferred_slice, 0)] 
+    
+        for slice_idx in range(self.num_slices):
+            if slice_idx != preferred_slice:
+                penalty = 0.1 
+                slice_options.append((slice_idx, penalty))
+        
+        slice_options.sort(key=lambda x: (self.slice_loads[x[0]] / self.slices[x[0]]["bandwidth"]) + x[1])
+        
+        for slice_idx, _ in slice_options:
+            if self.slice_loads[slice_idx] + load <= self.slices[slice_idx]["bandwidth"]:
+                ue["allocated_slice"] = slice_idx
+                self.ues.append(ue)
+                self.slice_loads[slice_idx] += load
+                self.ue_count_per_slice[slice_idx] += 1
+                self.ue_types_per_slice[slice_idx, profile_idx] += 1
+                return
+        
+        self.rejected_ues += 1
     
     def _process_movement(self, source_slice, target_slice):
         reward = 0
@@ -161,6 +224,11 @@ class NetworkSlicingEnv(gym.Env):
                 moved_load += ue["load"]
         
         if self.slice_loads[target_slice] + moved_load <= self.slices[target_slice]["bandwidth"]:
+            before_utilization = np.array([
+                self.slice_loads[i] / self.slices[i]["bandwidth"] 
+                for i in range(self.num_slices)
+            ])
+            
             for ue in ues_to_move:
                 self.ue_types_per_slice[source_slice, ue["profile"]] -= 1
                 self.ue_types_per_slice[target_slice, ue["profile"]] += 1
@@ -171,16 +239,25 @@ class NetworkSlicingEnv(gym.Env):
             
             self.ue_count_per_slice[source_slice] -= len(ues_to_move)
             self.ue_count_per_slice[target_slice] += len(ues_to_move)
+            after_utilization = np.array([
+                self.slice_loads[i] / self.slices[i]["bandwidth"] 
+                for i in range(self.num_slices)
+            ])
             
-            incorrect_slice_moves = sum(1 for ue in ues_to_move if ue["preferred_slice"] != target_slice)
-            correct_slice_moves = len(ues_to_move) - incorrect_slice_moves
+            before_std = np.std(before_utilization)
+            after_std = np.std(after_utilization)
+            balance_reward = 0.5 * (before_std - after_std)
             
-            before_std = np.std([load/slice["bandwidth"] for load, slice in zip(self.slice_loads, self.slices)])
-            after_std = np.std([(self.slice_loads[i]/self.slices[i]["bandwidth"]) for i in range(self.num_slices)])
+            correct_slice_moves = sum(1 for ue in ues_to_move if ue["preferred_slice"] == target_slice)
+            incorrect_slice_moves = len(ues_to_move) - correct_slice_moves
+            preference_reward = 0.5 * (correct_slice_moves - incorrect_slice_moves*0.5)
+            low_utilization_slices = after_utilization < 0.3  
+            utilization_reward = 0
+            if low_utilization_slices[target_slice]:
+                utilization_reward = 1.5 
+            reward = balance_reward + preference_reward + utilization_reward
             
-            reward = 0.5 * (before_std - after_std) + 0.5 * (correct_slice_moves - incorrect_slice_moves*0.5)
-            
-            if self.slice_loads[source_slice] / self.slices[source_slice]["bandwidth"] > 0.9:
+            if before_utilization[source_slice] > 0.9:
                 reward += 2
         else:
             reward = -2
@@ -893,14 +970,50 @@ def main():
     random.seed(42)
     
     env = NetworkSlicingEnv(arrival_rate=2)
-    best_agent = SACAgent(env.observation_space.shape[0], env.action_space.n)
-    best_agent.actor.load_state_dict(torch.load("models/sac_final.pth"))
     
-    print("\nRunning real-time simulation of slice allocation with SAC agent...\n")
+    if not os.path.exists("models/sac_final.pth"):
+        print("\nNo trained models found. Training agents...\n")
+        
+        num_episodes = 200  
+        
+        results = {}
+        
+        print("\nTraining DQN Agent...\n")
+        dqn_agent, dqn_results = train_agent("dqn", env, num_episodes=num_episodes)
+        results["DQN"] = dqn_results
+        
+        print("\nTraining SAC Agent...\n")
+        sac_agent, sac_results = train_agent("sac", env, num_episodes=num_episodes)
+        results["SAC"] = sac_results
+        
+        print("\nTraining PPO Agent...\n")
+        ppo_agent, ppo_results = train_agent("ppo", env, num_episodes=num_episodes)
+        results["PPO"] = ppo_results
+        
+        print("\nComparing agent performance...\n")
+        plot_training_curves(results)
+        
+        best_agent_name = max(results.keys(), 
+                             key=lambda k: results[k]["eval_rewards"][-1])
+        
+        print(f"\nBest performing agent: {best_agent_name}\n")
+        
+        if best_agent_name == "DQN":
+            best_agent = dqn_agent
+        elif best_agent_name == "SAC":
+            best_agent = sac_agent
+        else:
+            best_agent = ppo_agent
+            
+    else:
+        print("\nLoading pre-trained SAC agent...\n")
+        best_agent = SACAgent(env.observation_space.shape[0], env.action_space.n)
+        best_agent.actor.load_state_dict(torch.load("models/sac_final.pth"))
+
+    print("\nRunning real-time simulation of slice allocation...\n")
     animation = run_real_time_simulation(best_agent, env, update_interval=100)
     
     print("Simulation complete!")
-
 
 if __name__ == "__main__":
     main()
