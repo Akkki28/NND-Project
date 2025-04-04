@@ -1204,8 +1204,6 @@ def run_combined_simulation(agent, env, update_interval=100, sim_time=50):
     plt.show()
     return ani
 
-
-
 def main():
     np.random.seed(42)
     torch.manual_seed(42)

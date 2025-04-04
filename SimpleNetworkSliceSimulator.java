@@ -53,24 +53,24 @@ public class SimpleNetworkSliceSimulator {
         for (int i = 0; i < steps; i++) {
             currentStep++;
             
-            // Process new UE arrivals
+            
             processArrivals();
             
-            // Get the current observation/state
+            
             double[] observation = getObservation();
             
-            // Use the Python agent to select an action
+            
             int action = pythonAgent.getAction(observation);
             
-            // Apply the action (move UEs between slices)
+            
             int sourceSlice = action / SLICES.length;
             int targetSlice = action % SLICES.length;
             processMovement(sourceSlice, targetSlice);
             
-            // Update network state (UEs leaving, etc.)
+            
             updateNetworkState();
             
-            // Print status every 10 steps
+            
             if (i % 10 == 0) {
                 printStatus();
             }
@@ -90,10 +90,10 @@ public class SimpleNetworkSliceSimulator {
     }
     
     private void processArrivals() {
-        // Generate Poisson-distributed arrivals
+        
         int numArrivals = getPoissonRandom(arrivalRate);
         
-        // Every 10 steps, ensure we have all traffic types represented
+        
         if (currentStep % 10 == 0) {
             for (int profileIdx = 0; profileIdx < TRAFFIC_PROFILES.length; profileIdx++) {
                 TrafficProfile profile = TRAFFIC_PROFILES[profileIdx];
@@ -102,7 +102,7 @@ public class SimpleNetworkSliceSimulator {
             }
         }
         
-        // Process regular random arrivals
+        
         for (int i = 0; i < numArrivals; i++) {
             addUE();
         }
@@ -118,11 +118,11 @@ public class SimpleNetworkSliceSimulator {
         UserEquipment ue = new UserEquipment(profileIdx, load, preferredSlice, totalUEs);
         totalUEs++;
         
-        // Try to allocate to preferred slice first
+        
         if (sliceLoads[preferredSlice] + load <= SLICES[preferredSlice].getBandwidth()) {
             allocateUE(ue, preferredSlice);
         } else {
-            // Try other slices
+            
             boolean allocated = false;
             for (int slice = 0; slice < SLICES.length; slice++) {
                 if (slice != preferredSlice && sliceLoads[slice] + load <= SLICES[slice].getBandwidth()) {
@@ -145,23 +145,23 @@ public class SimpleNetworkSliceSimulator {
         UserEquipment ue = new UserEquipment(profileIdx, load, preferredSlice, totalUEs);
         totalUEs++;
         
-        // Create a list of slice options with penalties
-        List<SliceOption> sliceOptions = new ArrayList<>();
-        sliceOptions.add(new SliceOption(preferredSlice, 0)); // No penalty for preferred slice
         
-        // Add other slices with penalties
+        List<SliceOption> sliceOptions = new ArrayList<>();
+        sliceOptions.add(new SliceOption(preferredSlice, 0)); 
+        
+        
         for (int slice = 0; slice < SLICES.length; slice++) {
             if (slice != preferredSlice) {
                 sliceOptions.add(new SliceOption(slice, 0.1));
             }
         }
         
-        // Sort by relative load + penalty
+        
         sliceOptions.sort(Comparator.comparingDouble(
             option -> (sliceLoads[option.getSliceIdx()] / SLICES[option.getSliceIdx()].getBandwidth()) + option.getPenalty()
         ));
         
-        // Try to allocate to the best slice
+        
         boolean allocated = false;
         for (SliceOption option : sliceOptions) {
             int slice = option.getSliceIdx();
@@ -190,7 +190,7 @@ public class SimpleNetworkSliceSimulator {
             return;
         }
         
-        // Find UEs to move
+        
         List<UserEquipment> uesToMove = ues.stream()
             .filter(ue -> ue.getAllocatedSlice() == sourceSlice)
             .collect(Collectors.toList());
@@ -201,9 +201,9 @@ public class SimpleNetworkSliceSimulator {
         
         double movedLoad = uesToMove.stream().mapToDouble(UserEquipment::getLoad).sum();
         
-        // Check if target slice can accommodate all UEs
+        
         if (sliceLoads[targetSlice] + movedLoad <= SLICES[targetSlice].getBandwidth()) {
-            // Move UEs
+            
             for (UserEquipment ue : uesToMove) {
                 ue.setAllocatedSlice(targetSlice);
             }
@@ -221,13 +221,13 @@ public class SimpleNetworkSliceSimulator {
     }
     
     private void updateNetworkState() {
-        // Process UEs leaving the network
+        
         Iterator<UserEquipment> iterator = ues.iterator();
         while (iterator.hasNext()) {
             UserEquipment ue = iterator.next();
             ue.incrementTimeInNetwork();
             
-            // Chance of UE leaving increases with time
+            
             double leaveProb = Math.min(0.05, 0.001 * ue.getTimeInNetwork());
             if (random.nextDouble() < leaveProb) {
                 int sliceIdx = ue.getAllocatedSlice();
@@ -239,17 +239,17 @@ public class SimpleNetworkSliceSimulator {
     }
     
     private double[] getObservation() {
-        // Create observation vector similar to Python environment
+        
         int obsSize = SLICES.length * 2 + SLICES.length * TRAFFIC_PROFILES.length;
         double[] observation = new double[obsSize];
         
-        // UE count per slice (normalized)
+        
         int maxUECount = Math.max(1, Arrays.stream(ueCountPerSlice).max().orElse(1));
         for (int i = 0; i < SLICES.length; i++) {
             observation[i] = (double) ueCountPerSlice[i] / maxUECount;
         }
         
-        // UE types per slice (simplified)
+        
         int offset = SLICES.length;
         int[][] ueTypesPerSlice = new int[SLICES.length][TRAFFIC_PROFILES.length];
         for (UserEquipment ue : ues) {
@@ -265,7 +265,7 @@ public class SimpleNetworkSliceSimulator {
             }
         }
         
-        // Slice loads (normalized)
+        
         offset = SLICES.length + (SLICES.length * TRAFFIC_PROFILES.length);
         for (int i = 0; i < SLICES.length; i++) {
             observation[offset + i] = sliceLoads[i] / SLICES[i].getBandwidth();
@@ -332,7 +332,7 @@ public class SimpleNetworkSliceSimulator {
         }
     }
     
-    // Support classes
+    
     static class Slice {
         private String name;
         private double bandwidth;
@@ -419,21 +419,21 @@ class SimplePythonAgent {
     
     public void start() {
         try {
-            // Create a simple Python script for the agent
+            
             String scriptPath = createPythonScript();
             
-            // Start the Python process
+            
             ProcessBuilder pb = new ProcessBuilder("python", scriptPath);
             pb.redirectErrorStream(true);
             
             System.out.println("Starting Python agent process...");
             pythonProcess = pb.start();
             
-            // Set up communication channels
+            
             processInput = new BufferedWriter(new OutputStreamWriter(pythonProcess.getOutputStream()));
             processOutput = new BufferedReader(new InputStreamReader(pythonProcess.getInputStream()));
             
-            // Wait for startup message
+            
             String startupMsg = processOutput.readLine();
             System.out.println("Python agent: " + startupMsg);
             
@@ -445,7 +445,7 @@ class SimplePythonAgent {
     
     public int getAction(double[] observation) {
         try {
-            // Convert observation to JSON-like string
+            
             StringBuilder obsString = new StringBuilder("[");
             for (int i = 0; i < observation.length; i++) {
                 obsString.append(observation[i]);
@@ -455,18 +455,18 @@ class SimplePythonAgent {
             }
             obsString.append("]");
             
-            // Send observation to Python process
+            
             processInput.write(obsString.toString());
             processInput.newLine();
             processInput.flush();
             
-            // Read action from Python process
+            
             String actionStr = processOutput.readLine();
             return Integer.parseInt(actionStr.trim());
             
         } catch (Exception e) {
             System.err.println("Error getting action from Python agent: " + e.getMessage());
-            // Return a default action (move from slice 0 to 1)
+            
             return 1;
         }
     }
@@ -494,7 +494,7 @@ class SimplePythonAgent {
     }
     
     private String createPythonScript() throws IOException {
-        // Create a temporary file for the Python script
+        
         File tempScript = File.createTempFile("slice_agent_", ".py");
         tempScript.deleteOnExit();
         
