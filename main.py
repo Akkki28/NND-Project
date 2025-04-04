@@ -1,12 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+import simpy
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import collections
+from collections import defaultdict
 from tqdm import tqdm
 import gymnasium as gym
 from gymnasium import spaces
@@ -963,6 +965,279 @@ def run_real_time_simulation(agent, env, update_interval=100):
     
     return ani
 
+def run_simpy_simulation(agent, env, sim_time=50, update_interval=1):
+    import math
+    sim_env = simpy.Environment()
+    
+    # Prepare a Matplotlib figure with two subplots.
+    # Left: Bar chart for slice loads, Right: Enhanced network diagram.
+    fig, (ax_bar, ax_net) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Precompute node positions arranged on a circle for slices.
+    num_nodes = len(SLICES)
+    center = (0, 0)
+    radius = 4  # radius of the circle
+    node_positions = {}
+    for i in range(num_nodes):
+        angle = 2 * math.pi * i / num_nodes
+        x = center[0] + radius * math.cos(angle)
+        y = center[1] + radius * math.sin(angle)
+        node_positions[i] = (x, y)
+    
+    # Also precompute edges connecting all nodes (optional: full mesh)
+    edges = []
+    for i in range(num_nodes):
+        for j in range(i+1, num_nodes):
+            edges.append((node_positions[i], node_positions[j]))
+    
+    def simpy_process():
+        observation, _ = env.reset(seed=42)
+        while True:
+            action = agent.select_action(observation, evaluation=True)
+            observation, reward, done, _, info = env.step(action)
+            
+            # Update the left bar chart for slice loads.
+            ax_bar.clear()
+            x_values = list(range(len(info["slice_loads"])))
+            bars = ax_bar.bar(x_values, info["slice_loads"], color='skyblue')
+            ax_bar.set_xticks(x_values)
+            ax_bar.set_xticklabels([s["name"] for s in SLICES])
+            ax_bar.set_ylabel("Load (Mbps)")
+            ax_bar.set_title(f"Slice Loads - Step: {env.current_step}")
+            
+            # Update the enhanced network diagram.
+            ax_net.clear()
+            # Draw edges.
+            for (p1, p2) in edges:
+                ax_net.plot([p1[0], p2[0]], [p1[1], p2[1]], color='gray', linestyle='--', linewidth=1)
+            
+            # Draw nodes for each slice.
+            node_radius = 0.6
+            for i, slice_info in enumerate(SLICES):
+                x, y = node_positions[i]
+                # Node color reflects the normalized load.
+                load_norm = min(info["slice_loads"][i] / slice_info["bandwidth"], 1.0)
+                node_color = plt.cm.Reds(load_norm)
+                circle = plt.Circle((x, y), node_radius, color=node_color, ec='black', zorder=2)
+                ax_net.add_patch(circle)
+                ax_net.text(x, y+node_radius+0.2, slice_info["name"], ha='center', va='bottom', fontsize=10, zorder=3)
+            
+            # Plot UEs inside their respective node circles.
+            ue_x = []
+            ue_y = []
+            ue_colors = []
+            for ue in info["ues"]:
+                allocated_slice = ue.get("allocated_slice", -1)
+                if allocated_slice is None or allocated_slice < 0:
+                    continue
+                center_x, center_y = node_positions[allocated_slice]
+                # Uniformly scatter UEs inside the circle of the node.
+                r = node_radius * math.sqrt(random.uniform(0, 1))
+                theta = random.uniform(0, 2*math.pi)
+                pos_x = center_x + r * math.cos(theta)
+                pos_y = center_y + r * math.sin(theta)
+                ue_x.append(pos_x)
+                ue_y.append(pos_y)
+                ue_colors.append(ue["profile"])
+            
+            sc = ax_net.scatter(ue_x, ue_y, c=ue_colors, cmap='tab10', s=100,
+                                vmin=0, vmax=len(TRAFFIC_PROFILES)-1, edgecolors='k', zorder=3)
+            
+            ax_net.set_title("Enhanced Network Diagram: UE Allocation")
+            ax_net.set_xlim(-radius-2, radius+2)
+            ax_net.set_ylim(-radius-2, radius+2)
+            ax_net.set_aspect('equal')
+            ax_net.axis('off')
+            
+            plt.pause(0.1)
+            
+            if done:
+                observation, _ = env.reset()
+            
+            yield sim_env.timeout(update_interval)
+    
+    sim_env.process(simpy_process())
+    sim_env.run(until=sim_time)
+
+
+def run_combined_simulation(agent, env, update_interval=100, sim_time=50):
+    import math
+    # Create a figure with a 2x3 grid.
+    # Top row (3 subplots): 
+    #   ax_rt1: Current Slice Load (bar chart with capacity lines)
+    #   ax_rt2: Slice Load History
+    #   ax_rt3: UE Allocation
+    # Bottom row (2 subplots):
+    #   ax_sim1 (spanning first 2 columns): Enhanced Network Diagram
+    #   ax_sim2: Metrics display
+    fig = plt.figure(figsize=(18, 12))
+    gs = GridSpec(2, 3, figure=fig)
+    
+    # Top row subplots
+    ax_rt1 = fig.add_subplot(gs[0, 0])  # Bar chart with load limits
+    ax_rt2 = fig.add_subplot(gs[0, 1])  # Slice Load History
+    ax_rt3 = fig.add_subplot(gs[0, 2])  # UE Allocation
+
+    # Bottom row subplots: network diagram spans first 2 cols; metrics in last col.
+    ax_sim1 = fig.add_subplot(gs[1, :2])  # Enhanced Network Diagram
+    ax_sim2 = fig.add_subplot(gs[1, 2])   # Metrics display
+    ax_sim2.axis('off')
+    
+    # Pre-setup for real-time simulation history
+    slice_names = [s["name"] for s in SLICES]
+    slice_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    traffic_profile_names = [p["name"] for p in TRAFFIC_PROFILES]
+    steps_history = []
+    slice_load_history = [[] for _ in range(len(SLICES))]
+    
+    # Prepare colorbar for UE allocation view
+    scatter_rt = ax_rt3.scatter([], [], s=100, c=[], cmap='tab10',
+                                  vmin=0, vmax=len(TRAFFIC_PROFILES)-1)
+    cbar = plt.colorbar(scatter_rt, ax=ax_rt3)
+    cbar.set_ticks(np.arange(len(TRAFFIC_PROFILES)) + 0.5)
+    cbar.set_ticklabels(traffic_profile_names)
+    cbar.set_label('Traffic Profile')
+    
+    # Precompute node positions (for enhanced network diagram)
+    num_nodes = len(SLICES)
+    center = (0, 0)
+    radius = 4
+    node_positions = {}
+    for i in range(num_nodes):
+        angle = 2 * math.pi * i / num_nodes
+        x = center[0] + radius * math.cos(angle)
+        y = center[1] + radius * math.sin(angle)
+        node_positions[i] = (x, y)
+    # Precompute edges (full-mesh)
+    edges = []
+    for i in range(num_nodes):
+        for j in range(i+1, num_nodes):
+            edges.append((node_positions[i], node_positions[j]))
+    
+    observation, _ = env.reset(seed=42)
+    frame = 0
+    
+    def update(frame_num):
+        nonlocal frame, observation
+        action = agent.select_action(observation, evaluation=True)
+        new_observation, reward, done, _, info = env.step(action)
+        observation = new_observation
+        if done:
+            observation, _ = env.reset()
+
+        # --- Top Row Updates ---
+        # ax_rt1: Current Slice Load bar chart with capacity lines
+        ax_rt1.clear()
+        x = np.arange(len(slice_names))
+        bars = ax_rt1.bar(x, info["slice_loads"], color=slice_colors, alpha=0.7)
+        ax_rt1.set_xticks(x)
+        ax_rt1.set_xticklabels(slice_names)
+        ax_rt1.set_ylabel("Load (Mbps)")
+        ax_rt1.set_title("Real-Time: Current Slice Load")
+        # Add capacity lines (load limits) for each slice
+        for i, slice_info in enumerate(SLICES):
+            # xmin and xmax normalized to [0,1] based on bar position.
+            ax_rt1.axhline(y=slice_info["bandwidth"],
+                           xmin=i/len(slice_names),
+                           xmax=(i+1)/len(slice_names),
+                           color='r',
+                           linestyle='--',
+                           alpha=0.5)
+        
+        # ax_rt2: Update Slice Load History
+        steps_history.append(frame)
+        for i, load in enumerate(info["slice_loads"]):
+            slice_load_history[i].append(load)
+        max_history_points = 100  
+        start_idx = max(0, len(steps_history) - max_history_points)
+        visible_steps = steps_history[start_idx:]
+        ax_rt2.clear()
+        for i in range(len(slice_names)):
+            ax_rt2.plot(visible_steps, slice_load_history[i][start_idx:],
+                        label=slice_names[i], color=slice_colors[i])
+        ax_rt2.set_xlim(max(0, frame - max_history_points), frame)
+        ax_rt2.set_ylabel("Load (Mbps)")
+        ax_rt2.set_xlabel("Step")
+        ax_rt2.set_title("Real-Time: Slice Load History")
+        ax_rt2.legend(loc='upper left')
+        ax_rt2.grid(True)
+        
+        # ax_rt3: UE Allocation Scatter plot
+        ax_rt3.clear()
+        ue_x = []
+        ue_y = []
+        ue_colors = []
+        ue_positions = {i: 0 for i in range(len(SLICES))}
+        for ue in info["ues"]:
+            slice_idx = ue["allocated_slice"]
+            if slice_idx is None or slice_idx < 0:
+                continue
+            pos = ue_positions[slice_idx]
+            ue_positions[slice_idx] += 1
+            ue_x.append(slice_idx)
+            ue_y.append(pos)
+            ue_colors.append(ue["profile"])
+        scatter_rt = ax_rt3.scatter(ue_x, ue_y, s=100, c=ue_colors, cmap='tab10',
+                                      vmin=0, vmax=len(TRAFFIC_PROFILES)-1, edgecolors='k')
+        ax_rt3.set_xticks(range(len(SLICES)))
+        ax_rt3.set_xticklabels(slice_names)
+        ax_rt3.set_ylabel("UE Count")
+        ax_rt3.set_title("Real-Time: UE Allocation")
+        ax_rt3.grid(True)
+        
+        # --- Bottom Row Updates ---
+        # ax_sim1: Enhanced Network Diagram
+        ax_sim1.clear()
+        # Draw edges between nodes.
+        for (p1, p2) in edges:
+            ax_sim1.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                         color='gray', linestyle='--', linewidth=1)
+        node_radius = 0.6
+        for i, slice_info in enumerate(SLICES):
+            x_pos, y_pos = node_positions[i]
+            load_norm = min(info["slice_loads"][i] / slice_info["bandwidth"], 1.0)
+            node_color = plt.cm.Reds(load_norm)
+            circle = plt.Circle((x_pos, y_pos), node_radius, color=node_color,
+                                ec='black', zorder=2)
+            ax_sim1.add_patch(circle)
+            ax_sim1.text(x_pos, y_pos+node_radius+0.2, slice_info["name"],
+                         ha='center', va='bottom', fontsize=10, zorder=3)
+        ue_x_net = []
+        ue_y_net = []
+        ue_colors_net = []
+        for ue in info["ues"]:
+            allocated_slice = ue.get("allocated_slice", -1)
+            if allocated_slice is None or allocated_slice < 0:
+                continue
+            center_x, center_y = node_positions[allocated_slice]
+            r = node_radius * math.sqrt(random.uniform(0, 1))
+            theta = random.uniform(0, 2 * math.pi)
+            pos_x = center_x + r * math.cos(theta)
+            pos_y = center_y + r * math.sin(theta)
+            ue_x_net.append(pos_x)
+            ue_y_net.append(pos_y)
+            ue_colors_net.append(ue["profile"])
+        ax_sim1.scatter(ue_x_net, ue_y_net, c=ue_colors_net, cmap='tab10', s=100,
+                        vmin=0, vmax=len(TRAFFIC_PROFILES)-1, edgecolors='k', zorder=3)
+        ax_sim1.set_title("SimPy: Enhanced Network Diagram")
+        ax_sim1.set_xlim(-radius-2, radius+2)
+        ax_sim1.set_ylim(-radius-2, radius+2)
+        ax_sim1.set_aspect('equal')
+        ax_sim1.axis('off')
+
+        # ax_sim2: Display simulation metrics.
+        ax_sim2.clear()
+        ax_sim2.axis('off')
+        metrics = f"Step: {frame}\nTotal UEs: {env.total_ues}\nActive UEs: {len(info['ues'])}"
+        ax_sim2.text(0.5, 0.5, metrics, ha='center', va='center', fontsize=14)
+        
+        frame += 1
+        return []
+    
+    ani = animation.FuncAnimation(fig, update, interval=update_interval, blit=False)
+    plt.tight_layout()
+    plt.show()
+    return ani
 
 def main():
     np.random.seed(42)
@@ -1010,8 +1285,8 @@ def main():
         best_agent = SACAgent(env.observation_space.shape[0], env.action_space.n)
         best_agent.actor.load_state_dict(torch.load("models/sac_final.pth"))
 
-    print("\nRunning real-time simulation of slice allocation...\n")
-    animation = run_real_time_simulation(best_agent, env, update_interval=100)
+    print("\nRunning Combined Simulation...\n")
+    run_combined_simulation(best_agent, env, sim_time=50, update_interval=100)
     
     print("Simulation complete!")
 
