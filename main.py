@@ -13,6 +13,7 @@ from tqdm import tqdm
 import gymnasium as gym
 from gymnasium import spaces
 import os
+import math
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec
 import time
@@ -38,7 +39,7 @@ TRAFFIC_PROFILES = [
 ]
 
 class NetworkSlicingEnv(gym.Env):
-    def __init__(self, max_steps=200, arrival_rate=0.3):
+    def __init__(self, max_steps=10000, arrival_rate=0.3):
         super(NetworkSlicingEnv, self).__init__()
         
         self.max_steps = max_steps
@@ -1185,7 +1186,6 @@ def run_combined_simulation(agent, env, update_interval=100, sim_time=50):
             ue_colors_net.append(ue["profile"])
         ax_sim1.scatter(ue_x_net, ue_y_net, c=ue_colors_net, cmap='tab10', s=100,
                         vmin=0, vmax=len(TRAFFIC_PROFILES)-1, edgecolors='k', zorder=3)
-        ax_sim1.set_title("SimPy: Enhanced Network Diagram")
         ax_sim1.set_xlim(-radius-2, radius+2)
         ax_sim1.set_ylim(-radius-2, radius+2)
         ax_sim1.set_aspect('equal')
@@ -1203,6 +1203,8 @@ def run_combined_simulation(agent, env, update_interval=100, sim_time=50):
     plt.tight_layout()
     plt.show()
     return ani
+
+
 
 def main():
     np.random.seed(42)
